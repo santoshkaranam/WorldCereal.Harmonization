@@ -19,5 +19,7 @@ namespace IIASA.Dataset.Gdal.Feature
         public int Count { get; set; }
 
         public string ColumnValue { get; set; }
+
+        public string ExtendedData { get; set; } = "";
     }
 }

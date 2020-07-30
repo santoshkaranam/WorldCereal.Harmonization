@@ -13,7 +13,6 @@ namespace IIASA.Dataset.Harmonization.Core
 {
     public class ShpFileReader
     {
-        private const int ConcurrencyMultiplier = 2;
         private readonly ILogger _logger;
         private readonly Config _config;
         private string _missingMapsFileName = ".\\missingCodes.txt";
@@ -35,7 +34,7 @@ namespace IIASA.Dataset.Harmonization.Core
             var featureCount = GetFeatureCount(shpFilePath);
 
             int numProcs = Environment.ProcessorCount;
-            int concurrencyLevel = numProcs * ConcurrencyMultiplier;
+            int concurrencyLevel = numProcs * _config.ConcurrencyMultiplier;
             var maxCountToRead = featureCount / concurrencyLevel;
             var taskList = new List<Task>();
             for (int taskIndex = 0; taskIndex < concurrencyLevel; taskIndex++)
@@ -46,9 +45,10 @@ namespace IIASA.Dataset.Harmonization.Core
                 {
                     endIndex = featureCount;
                 }
+
                 _logger.Line($"MainTread-{Environment.CurrentManagedThreadId} - S-{startIndex} E-{endIndex} Total-{endIndex - startIndex}");
 
-                var task = CreateMetaDataReadTask(shpFilePath, endIndex, concurrentDictionary, startIndex);
+                var task = Task.Factory.StartNew(()=>CreateMetaDataReadTask(shpFilePath, endIndex, concurrentDictionary, startIndex));
                 taskList.Add(task);
             }
 
@@ -57,47 +57,53 @@ namespace IIASA.Dataset.Harmonization.Core
             return concurrentDictionary.Values.ToList();
         }
 
-        private Task CreateMetaDataReadTask(string shpFilePath, long endIndex, ConcurrentDictionary<string, FeatureMetaData> concurrentDictionary,
+        private void CreateMetaDataReadTask(string shpFilePath, long endIndex,
+            ConcurrentDictionary<string, FeatureMetaData> concurrentDictionary,
             long startIndex)
         {
-            var task = Task.Factory.StartNew(() =>
+
+            _logger.Line(
+                $"{Environment.CurrentManagedThreadId} - S-{startIndex} E-{endIndex} Total-{endIndex - startIndex}");
+
+            using var gdalWrapper = new GdalWrapper();
+            gdalWrapper.Configure();
+            gdalWrapper.InitializeDatasetForRead(shpFilePath, _config.InputDriverName);
+            IEnumerable<LayerWrapper> layers = gdalWrapper.GetLayers();
+            LayerWrapper layerWrapper = layers.First();
+
+            for (; startIndex < endIndex; startIndex++)
+            {
+                var featureWrapper = layerWrapper.GetFeature(startIndex);
+                if (featureWrapper == null) continue;
+                var area = featureWrapper.GetArea();
+                var columnValue = featureWrapper.GetFieldAsString(_config.ColNameToRead);
+                var extData = "";
+                foreach (var colName in _config.ColsToReadAsExtendedData)
                 {
-                    _logger.Line(
-                        $"{Environment.CurrentManagedThreadId} - S-{startIndex} E-{endIndex} Total-{endIndex - startIndex}");
+                    extData += featureWrapper.GetFieldAsString(colName) + ";";
+                }
 
-                    using (var gdalWrapper = new GdalWrapper())
+                concurrentDictionary.AddOrUpdate(columnValue,
+                    new FeatureMetaData {Area = area, Count = 1, ColumnValue = columnValue, ExtendedData = extData},
+                    (key, value) =>
                     {
-                        gdalWrapper.Configure();
-                        gdalWrapper.InitializeDatasetForRead(shpFilePath, _config.InputDriverName);
-                        IEnumerable<LayerWrapper> layers = gdalWrapper.GetLayers();
-                        LayerWrapper layerWrapper = layers.First();
+                        value.Count++;
+                        value.Area += area;
+                        return value;
+                    });
 
-                        for (; startIndex < endIndex; startIndex++)
-                        {
-                            var featureWrapper = layerWrapper.GetFeature(startIndex);
-                            if (featureWrapper == null) continue;
-                            var area = featureWrapper.GetArea();
-                            var columnValue = featureWrapper.GetFieldAsString(_config.ColNameToRead);
+                if ((endIndex - startIndex) % 1000 == 0)
+                {
+                    var sum = concurrentDictionary.Values.Sum(x => x.Count);
 
-                            concurrentDictionary.AddOrUpdate(columnValue,
-                                new FeatureMetaData {Area = area, Count = 1, ColumnValue = columnValue},
-                                (key, value) =>
-                                {
-                                    value.Count++;
-                                    value.Area += area;
-                                    return value;
-                                });
-
-                            if ((endIndex - startIndex) % 1000 == 0)
-                            {
-                                _logger.Line(
-                                    $"{Environment.CurrentManagedThreadId} S-{startIndex} E-{endIndex} Remaining-{endIndex - startIndex}");
-                            }
-                        }
+                    _logger.Line(
+                        $"{Environment.CurrentManagedThreadId} S-{startIndex} E-{endIndex} Remaining-{endIndex - startIndex}, TotalRead-{sum}");
+                    if (sum > _config.MaxFeatureToReadFromShp)
+                    {
+                        break;
                     }
                 }
-            );
-            return task;
+            }
         }
 
         private long GetFeatureCount(string shpFilePath)
@@ -119,13 +125,12 @@ namespace IIASA.Dataset.Harmonization.Core
             return featureCount;
         }
 
-
         public void Read(string shpPath, MapData[] map, DateTime dateTime, BlockingCollection<BaseFeature> featureList)
         {
             var featureCount = GetFeatureCount(shpPath);
 
             int numProcs = Environment.ProcessorCount;
-            int concurrencyLevel = numProcs * ConcurrencyMultiplier;
+            int concurrencyLevel = numProcs * _config.ConcurrencyMultiplier;
             var maxCountToRead = featureCount / concurrencyLevel;
             var taskList = new List<Task>();
             for (int taskIndex = 0; taskIndex < concurrencyLevel; taskIndex++)
@@ -205,15 +210,15 @@ namespace IIASA.Dataset.Harmonization.Core
             {
                 _logger.Line($"Failed to map feature data - {code}");
                 File.AppendAllLines(_missingMapsFileName, new[] { featureGeoData.ColumnValue});
-                featureData.LandCover = 0;
-                featureData.CropType1 = 0;
-                featureData.CropType2 = 0;
             }
             else
             {
                 featureData.LandCover = data.LandCover;
                 featureData.CropType1 = data.CropType1;
                 featureData.CropType2 = data.CropType2;
+                featureData.Irrigation1 = data.Irrigation1;
+                featureData.Irrigation2 = data.Irrigation2;
+                featureData.Irrigation3 = data.Irrigation3;
             }
 
             return featureData;

@@ -60,7 +60,8 @@ namespace IIASA.Dataset.Gdal
             for (int i = 0; i < count; i++)
             {
                 var ogrLayer = _dataSource.GetLayerByIndex(i);
-                result.Add(new LayerWrapper(ogrLayer));
+                var layerWrapper = new LayerWrapper(ogrLayer);  
+                result.Add(layerWrapper);
             }
 
             return result;
